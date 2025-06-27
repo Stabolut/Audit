@@ -9,11 +9,13 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "./Timelock.sol";
 
 interface IUSBStablecoin {
     function mint(address to, uint256 amount) external;
     function burnFrom(address from, uint256 amount) external;
     function totalSupply() external view returns (uint256);
+    function getUSDPrice() external view returns (uint256);
 }
 
 interface ITreasury {
@@ -46,9 +48,17 @@ contract StabolutEngine is
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant TIMELOCK_ADMIN_ROLE = keccak256("TIMELOCK_ADMIN_ROLE");
+    bytes32 public constant KYC_ADMIN_ROLE = keccak256("KYC_ADMIN_ROLE");
+
+    /// @notice Timelock contract
+    Timelock public timelock;
 
     /// @notice USB Stablecoin contract
     IUSBStablecoin public usbToken;
+    
+    /// @notice KYC verified users
+    mapping(address => bool) public isKycVerified;
 
     /// @notice Treasury contract
     ITreasury public treasury;
@@ -141,6 +151,8 @@ contract StabolutEngine is
         uint256 emergencyThreshold
     );
 
+    event TimelockUpdated(address newTimelock);
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -151,7 +163,8 @@ contract StabolutEngine is
         address _treasury,
         address _deltaNeutralStrategy,
         uint256 _treasuryYieldPercentage,
-        uint256 _emergencyThreshold
+        uint256 _emergencyThreshold,
+        address _timelock
     ) public initializer {
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -162,12 +175,15 @@ contract StabolutEngine is
         _grantRole(OPERATOR_ROLE, msg.sender);
         _grantRole(EMERGENCY_ROLE, msg.sender);
         _grantRole(UPGRADER_ROLE, msg.sender);
+        _grantRole(TIMELOCK_ADMIN_ROLE, msg.sender);
+        _grantRole(KYC_ADMIN_ROLE, msg.sender);
 
         usbToken = IUSBStablecoin(_usbToken);
         treasury = ITreasury(_treasury);
         deltaNeutralStrategy = IDeltaNeutralStrategy(_deltaNeutralStrategy);
         treasuryYieldPercentage = _treasuryYieldPercentage;
         emergencyThreshold = _emergencyThreshold;
+        timelock = Timelock(_timelock);
     }
 
     /**
@@ -180,28 +196,21 @@ contract StabolutEngine is
         nonReentrant 
         whenNotPaused 
     {
+        // Checks
+        require(isKycVerified[msg.sender], "Engine: KYC not verified");
         require(supportedTokens[token].isSupported, "Engine: token not supported");
         require(amount >= supportedTokens[token].minDepositAmount, "Engine: amount too small");
         require(amount <= supportedTokens[token].maxDepositAmount, "Engine: amount too large");
-
-        // Transfer tokens from user
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-
-        // Get current price from Chainlink
+        
         uint256 usdValue = _getTokenValueInUSD(token, amount);
         require(usdValue > 0, "Engine: invalid price");
 
         // Check for depeg protection
         require(!_isDepegged(), "Engine: depeg detected, deposits paused");
-
-        // Calculate USB to mint (with collateralization ratio)
+        
+        // Effects
         uint256 usbToMint = (usdValue * 10000) / MIN_COLLATERAL_RATIO;
 
-        // Execute delta neutral strategy
-        IERC20(token).safeApprove(address(deltaNeutralStrategy), amount);
-        uint256 yieldGenerated = deltaNeutralStrategy.deposit(token, amount);
-
-        // Update user deposit info
         UserDeposit storage userDeposit = userDeposits[msg.sender];
         userDeposit.totalDeposited += amount;
         userDeposit.usbMinted += usbToMint;
@@ -217,17 +226,18 @@ contract StabolutEngine is
             }
         }
         if (!tokenExists) {
+            require(userDeposit.collateralTokens.length < MAX_COLLATERAL_TYPES_PER_USER, "Engine: max collateral types reached");
             userDeposit.collateralTokens.push(token);
         }
 
-        // Update global metrics
         totalValueLocked += usdValue;
+
+        // Interactions
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(token).safeApprove(address(deltaNeutralStrategy), amount);
+        uint256 yieldGenerated = deltaNeutralStrategy.deposit(token, amount);
         totalYieldGenerated += yieldGenerated;
-
-        // Handle yield distribution
-        _distributeYield(yieldGenerated);
-
-        // Mint USB tokens
+        _distributeYield(token, yieldGenerated);
         usbToken.mint(msg.sender, usbToMint);
 
         emit Deposit(msg.sender, token, amount, usbToMint, block.timestamp);
@@ -237,12 +247,14 @@ contract StabolutEngine is
      * @dev Withdraw crypto by burning USB tokens
      * @param token Address of the token to withdraw
      * @param usbAmount Amount of USB tokens to burn
+     * @param minAmountOut Minimum amount of tokens to receive
      */
-    function withdraw(address token, uint256 usbAmount) 
+    function withdraw(address token, uint256 usbAmount, uint256 minAmountOut) 
         external 
         nonReentrant 
         whenNotPaused 
     {
+        // Checks
         require(supportedTokens[token].isSupported, "Engine: token not supported");
         require(usbAmount > 0, "Engine: amount must be positive");
 
@@ -250,13 +262,11 @@ contract StabolutEngine is
         require(userDeposit.usbMinted >= usbAmount, "Engine: insufficient USB balance");
         require(userDeposit.collateralAmounts[token] > 0, "Engine: no collateral for token");
 
-        // Calculate withdrawal amount
         uint256 usdValue = (usbAmount * MIN_COLLATERAL_RATIO) / 10000;
         uint256 tokenAmount = _getUSDValueInToken(token, usdValue);
 
         require(tokenAmount <= userDeposit.collateralAmounts[token], "Engine: insufficient collateral");
 
-        // Check collateralization after withdrawal
         uint256 remainingUSD = userDeposit.usbMinted - usbAmount;
         if (remainingUSD > 0) {
             uint256 remainingCollateralValue = _getUserTotalCollateralValue(msg.sender) - usdValue;
@@ -264,19 +274,16 @@ contract StabolutEngine is
             require(collateralRatio >= MIN_COLLATERAL_RATIO, "Engine: insufficient collateralization");
         }
 
-        // Burn USB tokens
-        usbToken.burnFrom(msg.sender, usbAmount);
-
-        // Withdraw from delta neutral strategy
-        uint256 actualAmount = deltaNeutralStrategy.withdraw(tokenAmount, msg.sender);
-
-        // Update user deposit info
+        // Effects
         userDeposit.usbMinted -= usbAmount;
         userDeposit.collateralAmounts[token] -= tokenAmount;
         userDeposit.lastUpdateTimestamp = block.timestamp;
-
-        // Update global metrics
         totalValueLocked -= usdValue;
+
+        // Interactions
+        usbToken.burnFrom(msg.sender, usbAmount);
+        uint256 actualAmount = deltaNeutralStrategy.withdraw(tokenAmount, msg.sender);
+        require(actualAmount >= minAmountOut, "Engine: slippage exceeded");
 
         emit Withdrawal(msg.sender, token, usbAmount, actualAmount, block.timestamp);
     }
@@ -285,15 +292,15 @@ contract StabolutEngine is
      * @dev Distribute yield between treasury and users
      * @param yieldAmount Amount of yield to distribute
      */
-    function _distributeYield(uint256 yieldAmount) internal {
+    function _distributeYield(address yieldToken, uint256 yieldAmount) internal {
         if (yieldAmount == 0) return;
 
         uint256 treasuryAmount = (yieldAmount * treasuryYieldPercentage) / 10000;
 
         if (treasuryAmount > 0) {
-            // Transfer yield to treasury (assuming it's in the same token for simplicity)
-            // In practice, this would need more sophisticated yield token handling
-            treasury.deposit(address(0), treasuryAmount); // address(0) for ETH or specific token
+            // Transfer yield to treasury
+            IERC20(yieldToken).safeTransfer(address(treasury), treasuryAmount);
+            treasury.deposit(yieldToken, treasuryAmount);
         }
 
         emit YieldGenerated(yieldAmount, treasuryAmount, block.timestamp);
@@ -311,7 +318,7 @@ contract StabolutEngine is
 
         (, int256 price, , uint256 updatedAt, ) = priceFeed.latestRoundData();
         require(price > 0, "Engine: invalid price");
-        require(block.timestamp - updatedAt <= 3600, "Engine: stale price"); // 1 hour max
+        require(block.timestamp - updatedAt <= 900, "Engine: stale price"); // 15 minutes max
 
         uint8 decimals = priceFeed.decimals();
         uint256 usdValue = (amount * uint256(price)) / (10 ** decimals);
@@ -331,7 +338,7 @@ contract StabolutEngine is
 
         (, int256 price, , uint256 updatedAt, ) = priceFeed.latestRoundData();
         require(price > 0, "Engine: invalid price");
-        require(block.timestamp - updatedAt <= 3600, "Engine: stale price");
+        require(block.timestamp - updatedAt <= 900, "Engine: stale price"); // 15 minutes max
 
         uint8 decimals = priceFeed.decimals();
         uint256 tokenAmount = (usdValue * (10 ** decimals)) / uint256(price);
@@ -364,10 +371,10 @@ contract StabolutEngine is
      * @return true if depegged
      */
     function _isDepegged() internal view returns (bool) {
-        // This would integrate with a USB/USD price feed
-        // For now, we'll implement a basic check
-        // In practice, you'd want to check multiple sources
-        return false; // Placeholder
+        uint256 usbPrice = usbToken.getUSDPrice();
+        uint256 oneDollar = 10**18;
+        uint256 priceDifference = usbPrice > oneDollar ? usbPrice - oneDollar : oneDollar - usbPrice;
+        return (priceDifference * 10000) / oneDollar > DEPEG_THRESHOLD;
     }
 
     /**
@@ -386,7 +393,7 @@ contract StabolutEngine is
         uint256 liquidationThreshold,
         uint256 stabilityFee,
         address priceFeed
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(token != address(0), "Engine: invalid token");
         require(priceFeed != address(0), "Engine: invalid price feed");
         require(maxDeposit > minDeposit, "Engine: invalid deposit limits");
@@ -412,13 +419,32 @@ contract StabolutEngine is
     function updateParameters(
         uint256 _treasuryYieldPercentage,
         uint256 _emergencyThreshold
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_treasuryYieldPercentage <= 10000, "Engine: invalid yield percentage");
 
         treasuryYieldPercentage = _treasuryYieldPercentage;
         emergencyThreshold = _emergencyThreshold;
 
         emit ParametersUpdated(_treasuryYieldPercentage, _emergencyThreshold);
+    }
+    
+    /**
+     * @dev Set the KYC status for a user
+     * @param user The address of the user
+     * @param status The KYC status
+     */
+    function setKycStatus(address user, bool status) external onlyRole(KYC_ADMIN_ROLE) {
+        isKycVerified[user] = status;
+    }
+
+    /**
+     * @dev Update timelock contract
+     * @param _timelock New timelock contract address
+     */
+    function setTimelock(address _timelock) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        require(_timelock != address(0), "Engine: invalid timelock");
+        timelock = Timelock(_timelock);
+        emit TimelockUpdated(_timelock);
     }
 
     /**

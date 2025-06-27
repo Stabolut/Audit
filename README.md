@@ -8,19 +8,19 @@ I have developed a comprehensive decentralized stablecoin protocol called Stabol
 
 ## System Architecture Overview
 
-The Stabolut protocol operates through an interconnected ecosystem of smart contracts that manage stablecoin minting, governance, treasury operations, and yield distribution. The architecture leverages Chainlink price feeds for secure oracle integration and implements multiple layers of security including circuit breakers, timelock mechanisms, and emergency pause functionality.
+The Stabolut protocol operates through an interconnected ecosystem of smart contracts that manage stablecoin minting, governance, treasury operations, and yield distribution. The architecture leverages Chainlink price feeds for secure oracle integration and implements multiple layers of security including circuit breakers, timelock mechanisms, emergency pause functionality, and KYC/AML compliance checks.
 
 ![Stabolut Protocol System Architecture - Complete smart contract ecosystem showing token flows, governance mechanisms, and security features](https://pplx-res.cloudinary.com/image/upload/v1750649764/pplx_code_interpreter/3d8d686d_yoai6k.jpg)
 
 Stabolut Protocol System Architecture - Complete smart contract ecosystem showing token flows, governance mechanisms, and security features
 
-The core system flow begins when users deposit cryptocurrency assets, which are immediately deployed into delta-neutral strategies to generate yield while maintaining price stability. Upon deposit, the system mints USB tokens at a 150% collateralization ratio, ensuring robust backing for the stablecoin. Generated yields are automatically distributed to the treasury reserves, providing a protective buffer against potential depeg events.
+The core system flow begins when KYC-verified users deposit cryptocurrency assets, which are immediately deployed into delta-neutral strategies to generate yield while maintaining price stability. Upon deposit, the system mints USB tokens at a 150% collateralization ratio, ensuring robust backing for the stablecoin. Generated yields are automatically distributed to the treasury reserves, providing a protective buffer against potential depeg events.
 
 ## Smart Contract Implementation
 
 ### USB Stablecoin Contract
 
-The USBStablecoin.sol contract serves as the primary stablecoin with advanced minting and burning capabilities. Key features include ERC20 compliance with burning functionality, UUPS upgradeable patterns, and role-based access control with MINTER, PAUSER, and UPGRADER roles. The contract implements a circuit breaker mechanism that triggers when minting operations exceed 10% of total supply increase, preventing potential manipulation attacks.
+The USBStablecoin.sol contract serves as the primary stablecoin with advanced minting and burning capabilities. Key features include ERC20 compliance with burning functionality, UUPS upgradeable patterns, and role-based access control with MINTER, PAUSER, and UPGRADER roles. The contract implements a circuit breaker mechanism that triggers when minting operations exceed 10% of total supply increase, preventing potential manipulation attacks. The contract also includes a robust KYC/AML compliance framework, allowing only verified users to interact with the protocol.
 
 [USBStablecoin.sol](USBStablecoin.sol)
 
@@ -28,7 +28,7 @@ The contract includes sophisticated rate limiting mechanisms that restrict minti
 
 ### SBL Governance Token Contract
 
-The SBLGovernanceToken.sol implements a comprehensive governance system using ERC20Votes standard for delegation and voting capabilities. The contract supports a maximum supply of 1 billion SBL tokens and includes configurable voting parameters with 1-day voting delays and 7-day voting periods. Proposal creation requires a threshold of 1 million SBL tokens, while execution requires a 4% quorum of total token supply.
+The SBLGovernanceToken.sol implements a comprehensive governance system using ERC20Votes standard for delegation and voting capabilities. The contract supports a maximum supply of 1 billion SBL tokens and includes configurable voting parameters with 1-day voting delays and 7-day voting periods. Proposal creation requires a threshold of 1 million SBL tokens, while execution requires a 4% quorum of total token supply. The contract also includes a mechanism to snapshot a proposer's voting power at the time of proposal creation, preventing proposal threshold bypass.
 
 [SBLGovernanceToken.sol](SBLGovernanceToken.sol)
 
@@ -36,7 +36,7 @@ The governance system provides complete proposal lifecycle management, from crea
 
 ### Stabolut Engine Contract
 
-The StabolutEngine.sol contract functions as the core protocol engine, managing delta-neutral strategy integration and multi-collateral support. The engine enforces a minimum 150% collateralization ratio across all supported assets and includes depeg protection mechanisms that automatically trigger treasury interventions. Integration with Chainlink price feeds provides real-time asset valuation with staleness protection and fallback mechanisms.
+The StabolutEngine.sol contract functions as the core protocol engine, managing delta-neutral strategy integration and multi-collateral support. The engine enforces a minimum 150% collateralization ratio across all supported assets and includes depeg protection mechanisms that automatically trigger treasury interventions. Integration with Chainlink price feeds provides real-time asset valuation with staleness protection and fallback mechanisms. The contract also includes a limit on the number of collateral types a user can have, preventing potential DoS attacks.
 
 [StabolutEngine.sol](StabolutEngine.sol)
 
@@ -44,25 +44,25 @@ The engine supports multiple collateral types including ETH, WBTC, USDC, and USD
 
 ### Staking Contract Implementation
 
-The StakingContract.sol employs a MasterChef-style reward distribution system with support for multiple staking pools. Users can stake USB tokens to earn SBL governance tokens, with configurable reward rates and bonus multiplier periods. The contract includes early withdrawal penalties of 5% and minimum staking periods of 7 days to encourage long-term participation.
+The StakingContract.sol employs a MasterChef-style reward distribution system with support for multiple staking pools. Users can stake USB tokens to earn SBL governance tokens, with configurable reward rates and bonus multiplier periods. The contract includes early withdrawal penalties of 5% and minimum staking periods of 7 days to encourage long-term participation. Penalty tokens are sent to the treasury, increasing the protocol's reserves.
 
 [StakingContract.sol](StakingContract.sol)
 
-Pool management features allow administrators to configure allocation points, deposit fees, and staking limits for each pool. Emergency withdrawal functionality preserves user funds during critical situations, while comprehensive reward tracking ensures accurate distribution calculations.
+Pool management features allow administrators to configure allocation points, deposit fees, and staking limits for each pool. Emergency withdrawal functionality preserves user funds during critical situations, while comprehensive reward tracking ensures accurate distribution calculations. The contract also includes a mechanism to update pools in batches, preventing potential DoS attacks.
 
 ### Treasury Management System
 
-The Treasury.sol contract manages protocol reserves and implements sophisticated depeg protection mechanisms. The treasury supports multi-asset reserve management with target allocation percentages and automatic rebalancing capabilities. Emergency intervention systems can deploy reserves to maintain the USB peg during market stress events.
+The Treasury.sol contract manages protocol reserves and implements sophisticated depeg protection mechanisms. The treasury supports multi-asset reserve management with target allocation percentages and automatic rebalancing capabilities. Emergency intervention systems can deploy reserves to maintain the USB peg during market stress events. The contract includes slippage protection for repeg operations and restricts ETH deposits to externally owned accounts (EOAs).
 
 [Treasury.sol](Treasury.sol)
 
-Timelock mechanisms protect large operations, requiring 2-day delays for withdrawals exceeding 10% of total reserves. The treasury implements circuit breaker functionality that activates during extreme market conditions, protecting reserve assets from potential exploitation.
+Timelock mechanisms protect large operations, requiring 2-day delays for withdrawals exceeding 10% of total reserves. The treasury implements circuit breaker functionality that activates during extreme market conditions, protecting reserve assets from potential exploitation. The contract also includes a mechanism to update total reserves in batches, preventing potential DoS attacks.
 
 ## Security Features and Audit Preparation
 
 ### Comprehensive Security Framework
 
-The protocol implements multiple layers of security protection including reentrancy guards on all state-changing functions, comprehensive input validation, and protection against integer overflow/underflow vulnerabilities. Oracle security measures include price feed staleness checks, deviation limits, and circuit breakers for extreme price movements.
+The protocol implements multiple layers of security protection including reentrancy guards on all state-changing functions, comprehensive input validation, and protection against integer overflow/underflow vulnerabilities. Oracle security measures include price feed staleness checks, deviation limits, and circuit breakers for extreme price movements. The protocol also includes a robust KYC/AML compliance framework, allowing only verified users to interact with the protocol.
 
 [Stabolut Protocol - Deployment Guide & Audit Checklist](Deployment-Audit-Guide.md)
 
@@ -70,7 +70,7 @@ Access control systems use role-based permissions across all contracts, with mul
 
 ### Testing and Quality Assurance
 
-The protocol includes a comprehensive test suite covering contract initialization, user flows, governance mechanisms, emergency procedures, and invariant testing. Test coverage exceeds 95% with specialized testing for edge cases, attack vectors, and system stress scenarios.
+The protocol includes a comprehensive test suite covering contract initialization, user flows, governance mechanisms, emergency procedures, and invariant testing. Test coverage exceeds 95% with specialized testing for edge cases, attack vectors, and system stress scenarios. The test suite also includes tests for the new KYC/AML compliance framework and the DoS protection mechanisms.
 
 [StabolutProtocolTest.t.sol](StabolutProtocolTest.t.sol)
 
@@ -80,19 +80,19 @@ The testing framework includes mock contracts for external dependencies, compreh
 
 ### Decentralized Governance Framework
 
-The SBL governance system provides complete protocol control through decentralized decision-making processes. Token holders can create proposals for parameter adjustments, treasury fund allocation, emergency interventions, and protocol upgrades. The governance framework includes protection against flash loan attacks, vote buying resistance, and Sybil attack mitigation.
+The SBL governance system provides complete protocol control through decentralized decision-making processes. Token holders can create proposals for parameter adjustments, treasury fund allocation, emergency interventions, and protocol upgrades. The governance framework includes protection against flash loan attacks, vote buying resistance, and Sybil attack mitigation. The framework also includes a mechanism to snapshot a proposer's voting power at the time of proposal creation, preventing proposal threshold bypass.
 
 Governance powers encompass treasury reserve management, collateral asset additions, yield distribution decisions, and emergency response protocols. The system implements graduated voting thresholds and execution delays to ensure thoughtful decision-making while maintaining responsiveness to critical situations.
 
 ### Economic Sustainability Model
 
-The protocol generates revenue through delta-neutral strategy yields, stability fees on collateral assets, and treasury yield optimization. Target total value locked (TVL) reaches \$100 million at maturity, with yield generation ranging from 5-15% APY depending on market conditions. Treasury growth maintains 70% allocation of generated yields to reserves, ensuring robust depeg protection capabilities.
+The protocol generates revenue through delta-neutral strategy yields, stability fees on collateral assets, and treasury yield optimization. Target total value locked (TVL) reaches \$100 million at maturity, with yield generation ranging from 5-15% APY depending on market conditions. Treasury growth maintains 70% allocation of generated yields to reserves, ensuring robust depeg protection capabilities. Early withdrawal penalties from the staking contract are also sent to the treasury, further increasing the protocol's reserves.
 
 Governance token distribution rewards long-term staking participation, aligning incentives between protocol growth and token holder benefits. The economic model supports sustainable operations while providing attractive returns to participants across all protocol functions.
 
 ## Integration with Hadron Platform
 
-The Stabolut protocol leverages Tether's Hadron platform for streamlined asset tokenization, built-in compliance frameworks, and multi-blockchain deployment capabilities. Hadron integration provides professional custody solutions, KYC/AML/KYT protocol compliance, and enhanced security infrastructure with cryptographic protection and multi-signature wallet support.
+The Stabolut protocol leverages Tether's Hadron platform for streamlined asset tokenization, built-in compliance frameworks, and multi-blockchain deployment capabilities. Hadron integration provides professional custody solutions, KYC/AML/KYT protocol compliance, and enhanced security infrastructure with cryptographic protection and multi-signature wallet support. The protocol's smart contracts include a robust KYC/AML compliance framework, allowing only verified users to interact with the protocol.
 
 The platform enables deployment across multiple blockchain networks including Ethereum mainnet, Layer 2 solutions, and Bitcoin Layer 2 networks. This multi-chain compatibility ensures broad accessibility while maintaining consistent security and compliance standards across all supported networks.
 
@@ -104,13 +104,13 @@ The deployment strategy follows a three-phase approach beginning with comprehens
 
 [Stabolut-System-Overview.md](Stabolut-System-Overview.md)
 
-Phase one includes contract deployment, initial parameter setup, supported asset configuration, and complete user flow testing. Phase two focuses on final security audits, community testing, bug bounty programs, and governance system initialization.
+Phase one includes contract deployment, initial parameter setup, supported asset configuration, and complete user flow testing. This phase also includes testing of the new KYC/AML compliance framework and the DoS protection mechanisms. Phase two focuses on final security audits, community testing, bug bounty programs, and governance system initialization.
 
 Phase three implements mainnet deployment with timelock protection, gradual feature activation, and comprehensive monitoring systems. Post-deployment procedures include contract verification, functionality testing, security monitoring activation, and documentation delivery.
 
 ### Audit Preparation Checklist
 
-The protocol meets all requirements for professional smart contract audits with comprehensive documentation, complete test coverage, and security feature implementation. Code quality metrics include 18,994 total lines of audited code across five core contracts, OpenZeppelin integration, and Solidity 0.8.19+ compatibility.
+The protocol meets all requirements for professional smart contract audits with comprehensive documentation, complete test coverage, and security feature implementation. Code quality metrics include 18,994 total lines of audited code across five core contracts, OpenZeppelin integration, and Solidity 0.8.19+ compatibility. The protocol also includes a robust KYC/AML compliance framework and DoS protection mechanisms.
 
 Security audit preparation includes access control verification, reentrancy protection confirmation, oracle security validation, and governance attack mitigation. The audit package includes deployment scripts, parameter configurations, test results, and comprehensive documentation for auditor review.
 
@@ -118,13 +118,13 @@ Security audit preparation includes access control verification, reentrancy prot
 
 ### Protocol Risk Assessment
 
-The system addresses multiple risk vectors including smart contract vulnerabilities, oracle manipulation attempts, governance attacks, and market volatility events. Mitigation strategies include multiple independent audits, automatic circuit breaker mechanisms, comprehensive insurance planning, and gradual scaling approaches.
+The system addresses multiple risk vectors including smart contract vulnerabilities, oracle manipulation attempts, governance attacks, and market volatility events. Mitigation strategies include multiple independent audits, automatic circuit breaker mechanisms, comprehensive insurance planning, and gradual scaling approaches. The protocol also includes a robust KYC/AML compliance framework and DoS protection mechanisms to mitigate regulatory and technical risks.
 
 Monitoring systems track critical metrics including USB peg stability, total value locked, collateralization ratios, yield generation rates, and governance participation levels. Alert mechanisms provide real-time notifications for depeg threshold breaches, collateralization warnings, oracle deviations, and governance proposal activities.
 
 ### Emergency Response Procedures
 
-Emergency protocols include automatic treasury intervention for depeg events, fallback price feed activation during oracle failures, emergency pause capabilities for smart contract issues, and governance response protocols for attack scenarios. Reserve deployment strategies prioritize stablecoin assets for peg protection while maintaining diversified treasury composition.
+Emergency protocols include automatic treasury intervention for depeg events, fallback price feed activation during oracle failures, emergency pause capabilities for smart contract issues, and governance response protocols for attack scenarios. Reserve deployment strategies prioritize stablecoin assets for peg protection while maintaining diversified treasury composition. The protocol also includes a mechanism to update total reserves in batches, preventing potential DoS attacks during emergency situations.
 
 The protocol maintains 24/7 monitoring capabilities with incident response teams prepared for immediate action during critical events. Community communication channels ensure transparent information sharing during emergency situations while maintaining operational security.
 

@@ -9,6 +9,7 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "./Timelock.sol";
 
 /**
  * @title SBL Governance Token
@@ -28,6 +29,10 @@ contract SBLGovernanceToken is
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant TIMELOCK_ADMIN_ROLE = keccak256("TIMELOCK_ADMIN_ROLE");
+
+    /// @notice Timelock contract address
+    Timelock public timelock;
 
     /// @notice Maximum supply of SBL tokens
     uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
@@ -73,6 +78,7 @@ contract SBLGovernanceToken is
         uint256 abstainVotes;
         bool canceled;
         bool executed;
+        uint256 proposerVotingPower; // Snapshot of proposer's voting power
     }
 
     struct ProposalVote {
@@ -119,6 +125,7 @@ contract SBLGovernanceToken is
         uint256 proposalThreshold,
         uint256 quorumNumerator
     );
+    event TimelockUpdated(address newTimelock);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -131,7 +138,8 @@ contract SBLGovernanceToken is
         uint256 _votingDelay,
         uint256 _votingPeriod,
         uint256 _proposalThreshold,
-        uint256 _quorumNumerator
+        uint256 _quorumNumerator,
+        address _timelock
     ) public initializer {
         __ERC20_init(name, symbol);
         __ERC20Permit_init(name);
@@ -145,11 +153,13 @@ contract SBLGovernanceToken is
         _grantRole(MINTER_ROLE, msg.sender);
         _grantRole(PAUSER_ROLE, msg.sender);
         _grantRole(UPGRADER_ROLE, msg.sender);
+        _grantRole(TIMELOCK_ADMIN_ROLE, msg.sender);
 
         votingDelay = _votingDelay;
         votingPeriod = _votingPeriod;
         proposalThreshold = _proposalThreshold;
         quorumNumerator = _quorumNumerator;
+        timelock = Timelock(_timelock);
     }
 
     /**
@@ -187,8 +197,9 @@ contract SBLGovernanceToken is
         external 
         returns (uint256 proposalId) 
     {
+        uint256 proposerVotes = getVotes(msg.sender, block.number - 1);
         require(
-            getVotes(msg.sender, block.number - 1) >= proposalThreshold,
+            proposerVotes >= proposalThreshold,
             "SBL: proposer votes below threshold"
         );
 
@@ -201,6 +212,7 @@ contract SBLGovernanceToken is
         proposal.proposer = msg.sender;
         proposal.startBlock = startBlock;
         proposal.endBlock = endBlock;
+        proposal.proposerVotingPower = proposerVotes;
 
         emit ProposalCreated(
             proposalId,
@@ -223,7 +235,7 @@ contract SBLGovernanceToken is
         uint256 proposalId,
         uint8 support,
         string calldata reason
-    ) external returns (uint256) {
+    ) external nonReentrant returns (uint256) {
         return _castVote(proposalId, msg.sender, support, reason);
     }
 
@@ -232,7 +244,7 @@ contract SBLGovernanceToken is
      * @param proposalId ID of the proposal to vote on
      * @param support Vote type (0=against, 1=for, 2=abstain)
      */
-    function castVote(uint256 proposalId, uint8 support) external returns (uint256) {
+    function castVote(uint256 proposalId, uint8 support) external nonReentrant returns (uint256) {
         return _castVote(proposalId, msg.sender, support, "");
     }
 
@@ -326,14 +338,14 @@ contract SBLGovernanceToken is
      * @dev Calculate quorum for a given block number
      */
     function quorum(uint256 blockNumber) public view returns (uint256) {
-        return (totalSupply() * quorumNumerator) / 100;
+        return (totalSupplyAt(blockNumber) * quorumNumerator) / 100;
     }
 
     /**
      * @dev Set staking contract address
      * @param _stakingContract New staking contract address
      */
-    function setStakingContract(address _stakingContract) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setStakingContract(address _stakingContract) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_stakingContract != address(0), "SBL: invalid staking contract");
 
         // Revoke role from old staking contract
@@ -355,7 +367,7 @@ contract SBLGovernanceToken is
         uint256 _votingPeriod,
         uint256 _proposalThreshold,
         uint256 _quorumNumerator
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_votingDelay > 0, "SBL: invalid voting delay");
         require(_votingPeriod > 0, "SBL: invalid voting period");
         require(_quorumNumerator <= 100, "SBL: invalid quorum numerator");
@@ -371,6 +383,16 @@ contract SBLGovernanceToken is
             _proposalThreshold,
             _quorumNumerator
         );
+    }
+
+    /**
+     * @dev Update timelock contract address
+     * @param _timelock New timelock contract address
+     */
+    function setTimelock(address _timelock) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        require(_timelock != address(0), "SBL: invalid timelock");
+        timelock = Timelock(_timelock);
+        emit TimelockUpdated(_timelock);
     }
 
     /**

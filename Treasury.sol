@@ -9,11 +9,13 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "./Timelock.sol";
 
 interface IUSBStablecoin {
     function mint(address to, uint256 amount) external;
     function burn(uint256 amount) external;
     function totalSupply() external view returns (uint256);
+    function getUSDPrice() external view returns (uint256);
 }
 
 interface IGovernor {
@@ -39,6 +41,10 @@ contract Treasury is
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant TIMELOCK_ADMIN_ROLE = keccak256("TIMELOCK_ADMIN_ROLE");
+
+    /// @notice Timelock contract
+    Timelock public timelock;
 
     /// @notice USB stablecoin contract
     IUSBStablecoin public usbToken;
@@ -125,6 +131,7 @@ contract Treasury is
         uint256 minimumReserveRatio,
         uint256 depegThreshold
     );
+    event TimelockUpdated(address newTimelock);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -138,7 +145,8 @@ contract Treasury is
         uint256 _depegThreshold,
         uint256 _maxSingleWithdrawal,
         uint256 _timelockDuration,
-        uint256 _minInterventionInterval
+        uint256 _minInterventionInterval,
+        address _timelock
     ) public initializer {
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -149,6 +157,7 @@ contract Treasury is
         _grantRole(TREASURY_MANAGER_ROLE, msg.sender);
         _grantRole(EMERGENCY_ROLE, msg.sender);
         _grantRole(UPGRADER_ROLE, msg.sender);
+        _grantRole(TIMELOCK_ADMIN_ROLE, msg.sender);
 
         usbToken = IUSBStablecoin(_usbToken);
         emergencyReservePercentage = _emergencyReservePercentage;
@@ -157,6 +166,7 @@ contract Treasury is
         maxSingleWithdrawal = _maxSingleWithdrawal;
         timelockDuration = _timelockDuration;
         minInterventionInterval = _minInterventionInterval;
+        timelock = Timelock(_timelock);
     }
 
     /**
@@ -177,6 +187,7 @@ contract Treasury is
 
         if (asset == address(0)) {
             // ETH deposit
+            require(tx.origin == msg.sender, "Treasury: contract deposits not allowed");
             require(msg.value == amount, "Treasury: ETH amount mismatch");
             require(reserveAssets[asset].isSupported, "Treasury: ETH not supported");
         } else {
@@ -189,7 +200,7 @@ contract Treasury is
         }
 
         reserveAssets[asset].balance += amount;
-        _updateTotalReservesUSD();
+        _updateTotalReservesUSD(0, supportedAssets.length);
         _updateAssetAllocation(asset);
 
         emit Deposit(asset, amount, block.timestamp);
@@ -245,6 +256,7 @@ contract Treasury is
         nonReentrant 
         whenNotPaused 
     {
+        // Checks
         PendingOperation storage operation = pendingOperations[operationId];
         require(operation.executeAfter > 0, "Treasury: operation not found");
         require(!operation.executed, "Treasury: already executed");
@@ -255,7 +267,6 @@ contract Treasury is
             "Treasury: unauthorized"
         );
 
-        // Check reserve ratio after withdrawal
         uint256 assetValueUSD = _getAssetValueInUSD(operation.asset, operation.amount);
         uint256 newTotalReserves = totalReservesUSD - assetValueUSD;
         uint256 usbSupply = usbToken.totalSupply();
@@ -265,7 +276,7 @@ contract Treasury is
             require(newReserveRatio >= minimumReserveRatio, "Treasury: reserve ratio too low");
         }
 
-        // Execute withdrawal
+        // Effects
         reserveAssets[operation.asset].balance -= operation.amount;
         operation.executed = true;
 
@@ -277,7 +288,7 @@ contract Treasury is
             IERC20(operation.asset).safeTransfer(operation.recipient, operation.amount);
         }
 
-        _updateTotalReservesUSD();
+        _updateTotalReservesUSD(0, supportedAssets.length);
         _updateAssetAllocation(operation.asset);
 
         emit OperationExecuted(operationId, OperationType.WITHDRAWAL);
@@ -288,7 +299,7 @@ contract Treasury is
      * @dev Emergency depeg intervention
      * @param usbAmount Amount of USB to support
      */
-    function emergencyDepegIntervention(uint256 usbAmount) 
+    function emergencyDepegIntervention(uint256 usbAmount, uint256 minAmountOut) 
         external 
         onlyRole(EMERGENCY_ROLE) 
         nonReentrant 
@@ -308,7 +319,7 @@ contract Treasury is
         require(totalReservesUSD >= requiredReserves, "Treasury: insufficient reserves");
 
         // Use emergency reserves (prefer stablecoins)
-        _useReservesForRepeg(requiredReserves);
+        _useReservesForRepeg(requiredReserves, minAmountOut);
 
         lastDepegIntervention = block.timestamp;
 
@@ -347,7 +358,7 @@ contract Treasury is
         uint256 targetAllocation,
         address priceFeed,
         bool isStable
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(!reserveAssets[asset].isSupported, "Treasury: asset already supported");
         require(targetAllocation <= 10000, "Treasury: invalid allocation");
         require(priceFeed != address(0), "Treasury: invalid price feed");
@@ -434,7 +445,7 @@ contract Treasury is
 
         (, int256 price, , uint256 updatedAt, ) = priceFeed.latestRoundData();
         require(price > 0, "Treasury: invalid price");
-        require(block.timestamp - updatedAt <= 3600, "Treasury: stale price");
+        require(block.timestamp - updatedAt <= 900, "Treasury: stale price"); // 15 minutes max
 
         uint8 decimals = priceFeed.decimals();
         return (amount * uint256(price)) / (10 ** decimals);
@@ -442,10 +453,12 @@ contract Treasury is
 
     /**
      * @dev Update total reserves USD value
+     * @param from Asset index to start from
+     * @param to Asset index to end at
      */
-    function _updateTotalReservesUSD() internal {
+    function _updateTotalReservesUSD(uint256 from, uint256 to) internal {
         uint256 total = 0;
-        for (uint256 i = 0; i < supportedAssets.length; i++) {
+        for (uint256 i = from; i < to; i++) {
             address asset = supportedAssets[i];
             total += _getAssetValueInUSD(asset, reserveAssets[asset].balance);
         }
@@ -471,16 +484,18 @@ contract Treasury is
      * @return true if depeg detected
      */
     function _isDepegDetected() internal view returns (bool) {
-        // This would integrate with USB/USD price feed
-        // Simplified implementation
-        return false; // Placeholder
+        uint256 usbPrice = usbToken.getUSDPrice();
+        uint256 oneDollar = 10**18;
+        uint256 priceDifference = usbPrice > oneDollar ? usbPrice - oneDollar : oneDollar - usbPrice;
+        return (priceDifference * 10000) / oneDollar > depegThreshold;
     }
 
     /**
      * @dev Use reserves for repeg operation
      * @param amount Amount needed for repeg
+     * @param minAmountOut Minimum amount of assets to receive
      */
-    function _useReservesForRepeg(uint256 amount) internal {
+    function _useReservesForRepeg(uint256 amount, uint256 minAmountOut) internal {
         // Priority: Use stablecoins first, then other assets
         uint256 remaining = amount;
 
@@ -493,12 +508,14 @@ contract Treasury is
                 uint256 toUse = remaining > assetValue ? assetValue : remaining;
                 uint256 assetAmount = (toUse * reserve.balance) / assetValue;
 
+                require(assetAmount >= minAmountOut, "Treasury: slippage exceeded");
+
                 reserve.balance -= assetAmount;
                 remaining -= toUse;
             }
         }
 
-        _updateTotalReservesUSD();
+        _updateTotalReservesUSD(0, supportedAssets.length);
     }
 
     /**
@@ -528,7 +545,7 @@ contract Treasury is
         uint256 _emergencyReservePercentage,
         uint256 _minimumReserveRatio,
         uint256 _depegThreshold
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_emergencyReservePercentage <= 10000, "Treasury: invalid percentage");
         require(_minimumReserveRatio <= 10000, "Treasury: invalid ratio");
         require(_depegThreshold <= 1000, "Treasury: invalid threshold");
@@ -542,6 +559,16 @@ contract Treasury is
             _minimumReserveRatio,
             _depegThreshold
         );
+    }
+
+    /**
+     * @dev Update timelock contract
+     * @param _timelock New timelock contract address
+     */
+    function setTimelock(address _timelock) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        require(_timelock != address(0), "Treasury: invalid timelock");
+        timelock = Timelock(_timelock);
+        emit TimelockUpdated(_timelock);
     }
 
     /**

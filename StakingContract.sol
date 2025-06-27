@@ -8,10 +8,15 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "./Timelock.sol";
 
 interface ISBLGovernanceToken {
     function mint(address to, uint256 amount) external;
     function burn(uint256 amount) external;
+}
+
+interface ITreasury {
+    function deposit(address asset, uint256 amount) external;
 }
 
 /**
@@ -30,6 +35,13 @@ contract StakingContract is
 
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant TIMELOCK_ADMIN_ROLE = keccak256("TIMELOCK_ADMIN_ROLE");
+
+    /// @notice Timelock contract
+    Timelock public timelock;
+
+    /// @notice Treasury contract
+    ITreasury public treasury;
 
     /// @notice USB token contract
     IERC20 public usbToken;
@@ -57,6 +69,9 @@ contract StakingContract is
 
     /// @notice Bonus multiplier
     uint256 public bonusMultiplier;
+
+    /// @notice Maximum bonus multiplier
+    uint256 public constant MAX_BONUS_MULTIPLIER = 10;
 
     /// @notice Total allocation points
     uint256 public totalAllocPoint;
@@ -95,6 +110,8 @@ contract StakingContract is
     event PoolUpdated(uint256 indexed pid, uint256 allocPoint, uint256 depositFeeBP);
     event RewardRateUpdated(uint256 newSblPerBlock);
     event BonusParametersUpdated(uint256 bonusEndBlock, uint256 bonusMultiplier);
+    event TimelockUpdated(address newTimelock);
+    event TreasuryUpdated(address newTreasury);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -109,7 +126,9 @@ contract StakingContract is
         uint256 _bonusEndBlock,
         uint256 _bonusMultiplier,
         uint256 _minimumStakingPeriod,
-        uint256 _earlyWithdrawalPenalty
+        uint256 _earlyWithdrawalPenalty,
+        address _timelock,
+        address _treasury
     ) public initializer {
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -119,6 +138,7 @@ contract StakingContract is
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(OPERATOR_ROLE, msg.sender);
         _grantRole(UPGRADER_ROLE, msg.sender);
+        _grantRole(TIMELOCK_ADMIN_ROLE, msg.sender);
 
         usbToken = IERC20(_usbToken);
         sblToken = ISBLGovernanceToken(_sblToken);
@@ -128,6 +148,8 @@ contract StakingContract is
         bonusMultiplier = _bonusMultiplier;
         minimumStakingPeriod = _minimumStakingPeriod;
         earlyWithdrawalPenalty = _earlyWithdrawalPenalty;
+        timelock = Timelock(_timelock);
+        treasury = ITreasury(_treasury);
     }
 
     /**
@@ -146,13 +168,13 @@ contract StakingContract is
         uint256 _minStakeAmount,
         uint256 _maxStakeAmount,
         bool _withUpdate
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_depositFeeBP <= 400, "Staking: deposit fee too high"); // Max 4%
         require(address(_lpToken) != address(0), "Staking: invalid token address");
         require(_maxStakeAmount > _minStakeAmount, "Staking: invalid stake limits");
 
         if (_withUpdate) {
-            massUpdatePools();
+            massUpdatePools(0, poolLength);
         }
 
         uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
@@ -186,12 +208,12 @@ contract StakingContract is
         uint256 _allocPoint,
         uint256 _depositFeeBP,
         bool _withUpdate
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_pid < poolLength, "Staking: invalid pool ID");
         require(_depositFeeBP <= 400, "Staking: deposit fee too high");
 
         if (_withUpdate) {
-            massUpdatePools();
+            massUpdatePools(0, poolLength);
         }
 
         PoolInfo storage pool = poolInfo[_pid];
@@ -244,9 +266,11 @@ contract StakingContract is
 
     /**
      * @dev Update reward variables for all pools
+     * @param from Pool ID to start from
+     * @param to Pool ID to end at
      */
-    function massUpdatePools() public {
-        for (uint256 pid = 0; pid < poolLength; ++pid) {
+    function massUpdatePools(uint256 from, uint256 to) public {
+        for (uint256 pid = from; pid < to; ++pid) {
             updatePool(pid);
         }
     }
@@ -312,7 +336,7 @@ contract StakingContract is
         if (pool.depositFeeBP > 0) {
             uint256 depositFee = (_amount * pool.depositFeeBP) / 10000;
             depositAmount = _amount - depositFee;
-            pool.lpToken.safeTransferFrom(address(msg.sender), address(this), depositFee);
+            pool.lpToken.safeTransferFrom(address(msg.sender), address(treasury), depositFee);
         }
 
         // Transfer tokens from user
@@ -354,7 +378,7 @@ contract StakingContract is
         if (block.timestamp < user.lastStakeTime + minimumStakingPeriod) {
             uint256 penalty = (_amount * earlyWithdrawalPenalty) / 10000;
             withdrawAmount = _amount - penalty;
-            // Penalty tokens remain in the contract
+            pool.lpToken.safeTransfer(address(treasury), penalty);
         }
 
         if (withdrawAmount > 0) {
@@ -421,8 +445,8 @@ contract StakingContract is
      * @dev Update SBL reward rate
      * @param _sblPerBlock New SBL tokens per block
      */
-    function updateRewardRate(uint256 _sblPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        massUpdatePools();
+    function updateRewardRate(uint256 _sblPerBlock) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        massUpdatePools(0, poolLength);
         sblPerBlock = _sblPerBlock;
         emit RewardRateUpdated(_sblPerBlock);
     }
@@ -435,7 +459,8 @@ contract StakingContract is
     function updateBonusParameters(
         uint256 _bonusEndBlock,
         uint256 _bonusMultiplier
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        require(_bonusMultiplier <= MAX_BONUS_MULTIPLIER, "Staking: bonus multiplier too high");
         bonusEndBlock = _bonusEndBlock;
         bonusMultiplier = _bonusMultiplier;
         emit BonusParametersUpdated(_bonusEndBlock, _bonusMultiplier);
@@ -446,9 +471,29 @@ contract StakingContract is
      * @param _pid Pool ID
      * @param _isActive Whether the pool is active
      */
-    function setPoolStatus(uint256 _pid, bool _isActive) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setPoolStatus(uint256 _pid, bool _isActive) external onlyRole(TIMELOCK_ADMIN_ROLE) {
         require(_pid < poolLength, "Staking: invalid pool ID");
         poolInfo[_pid].isActive = _isActive;
+    }
+
+    /**
+     * @dev Update timelock contract
+     * @param _timelock New timelock contract address
+     */
+    function setTimelock(address _timelock) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        require(_timelock != address(0), "Staking: invalid timelock");
+        timelock = Timelock(_timelock);
+        emit TimelockUpdated(_timelock);
+    }
+
+    /**
+     * @dev Update treasury contract
+     * @param _treasury New treasury contract address
+     */
+    function setTreasury(address _treasury) external onlyRole(TIMELOCK_ADMIN_ROLE) {
+        require(_treasury != address(0), "Staking: invalid treasury");
+        treasury = ITreasury(_treasury);
+        emit TreasuryUpdated(_treasury);
     }
 
     /**
