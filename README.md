@@ -10,7 +10,7 @@ I have developed a comprehensive decentralized stablecoin protocol called Stabol
 
 The Stabolut protocol operates through an interconnected ecosystem of smart contracts that manage stablecoin minting, governance, treasury operations, and yield distribution. The architecture leverages Chainlink price feeds for secure oracle integration and implements multiple layers of security including circuit breakers, timelock mechanisms, emergency pause functionality, and KYC/AML compliance checks.
 
-![Stabolut Protocol System Architecture - Complete smart contract ecosystem showing token flows, governance mechanisms, and security features](https://pplx-res.cloudinary.com/image/upload/v1750649764/pplx_code_interpreter/3d8d686d_yoai6k.jpg)
+![Stabolut Protocol System Architecture - Complete smart contract ecosystem showing token flows, governance mechanisms, and security features](./stabolut_architecture.png)
 
 Stabolut Protocol System Architecture - Complete smart contract ecosystem showing token flows, governance mechanisms, and security features
 
